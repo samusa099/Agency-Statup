@@ -1,0 +1,89 @@
+name: PR Governance Actions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-governance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-governance:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Diff Calculator Action
+        id: diff
+        uses: themoin/diff-calculator@v0.2.3
+        with:
+          source: ${{ github.event.pull_request.head.sha }}
+          target: ${{ github.event.pull_request.base.sha }}
+          ignore-deletion: "false"
+          ignore-whitespace: "false"
+          verbose: "true"
+
+      - name: limit-size
+        uses: 7PH/limit-size@v1.0.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: |
+            **/*: 25mb
+          fail_on_exceeded: "true"
+
+      - name: Detect optional integrations
+        id: optional
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MONTARA_WEBHOOK_URL: ${{ secrets.MONTARA_WEBHOOK_URL }}
+          SKILL_NAME: ${{ vars.SKILL_NAME }}
+          SKILL_PATH: ${{ vars.SKILL_PATH }}
+        run: |
+          [[ -f .reviewers.yaml ]] && echo "reviewers=true" >> "$GITHUB_OUTPUT" || echo "reviewers=false" >> "$GITHUB_OUTPUT"
+          [[ -f .github/auto-label.json ]] && echo "labels=true" >> "$GITHUB_OUTPUT" || echo "labels=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$ANTHROPIC_API_KEY" && -n "$SKILL_NAME" && -n "$SKILL_PATH" && -d "$SKILL_PATH" ]] && echo "skill_eval=true" >> "$GITHUB_OUTPUT" || echo "skill_eval=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$MONTARA_WEBHOOK_URL" ]] && echo "montara=true" >> "$GITHUB_OUTPUT" || echo "montara=false" >> "$GITHUB_OUTPUT"
+
+      - name: PR Reviewers Action
+        if: steps.optional.outputs.reviewers == 'true'
+        uses: patricklubach/reviewer-action@v1.0.0
+        with:
+          reviewers_file: .reviewers.yaml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ github.event.pull_request.number }}
+
+      - name: Auto Label Action
+        if: steps.optional.outputs.labels == 'true' && github.event_name == 'pull_request'
+        uses: banyan/auto-label@1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          configPath: .github/auto-label.json
+
+      - name: Skill Eval
+        if: steps.optional.outputs.skill_eval == 'true' && github.event_name == 'pull_request'
+        uses: skill-bench/skill-eval-action@v1.3.0
+        with:
+          skill-name: ${{ vars.SKILL_NAME }}
+          skill-path: ${{ vars.SKILL_PATH }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Montara CI
+        if: steps.optional.outputs.montara == 'true' && github.event_name == 'pull_request'
+        uses: montara-io/montara-ci@v1.0.20
+        with:
+          webhookUrl: ${{ secrets.MONTARA_WEBHOOK_URL }}
